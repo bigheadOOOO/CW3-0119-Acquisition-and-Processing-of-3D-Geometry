@@ -16,5 +16,5 @@ training:
 
 sampling:
   type: curvature  # curvature or uniform
-  curvature_fractions: [0.2, 0.6, 0.2]
-  curvature_percentiles: [0.6, 0.95]
+  curv_fractions: [0.2, 0.6, 0.2]
+  curv_percentiles: [0.6, 0.95]

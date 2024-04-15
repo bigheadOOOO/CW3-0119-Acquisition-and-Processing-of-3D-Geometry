@@ -74,7 +74,7 @@ def create_mesh(
     filename="",
     t=None,
     N=256,
-    max_batch=64 ** 3,
+    max_batch=64*2 ** 2, # GPU 
     offset=None,
     scale=None,
     device="cpu",

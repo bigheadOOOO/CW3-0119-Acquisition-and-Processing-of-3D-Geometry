@@ -9,22 +9,6 @@ import logging
 import torch
 from i3d.model import SIREN
 
-
-def create_output_paths(checkpoint_path, experiment_name, overwrite=True):
-    """Helper function to create the output folders. Returns the resulting path.
-    """
-    full_path = osp.join(".", checkpoint_path, experiment_name)
-    if osp.exists(full_path) and overwrite:
-        shutil.rmtree(full_path)
-    elif osp.exists(full_path):
-        logging.warning("Output path exists. Not overwritting.")
-        return full_path
-
-    os.makedirs(osp.join(full_path, "models"))
-    os.makedirs(osp.join(full_path, "reconstructions"))
-    return full_path
-
-
 def load_experiment_parameters(parameters_path):
     try:
         with open(parameters_path, "r") as fin:

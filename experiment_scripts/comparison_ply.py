@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils import parameters_to_vector
 import diff_operators
-from loss_functions import true_sdf, sdf_sitzmann
+from loss_functions import loss_true_sdf, sdf_sitzmann
 from meshing import (convert_sdf_samples_to_ply, gen_mc_coordinate_grid,
                      save_ply)
 from model import SIREN
@@ -57,7 +57,7 @@ def lowMedHighCurvSegmentation(
         The vertices sampled from `mesh`.
     """
     on_surface_sampled = 0
-    on_surface_pts = torch.column_stack((
+    on_surface_points = torch.column_stack((
         torch.from_numpy(mesh.vertex["positions"].numpy()),
         torch.from_numpy(mesh.vertex["normals"].numpy()),
         torch.from_numpy(mesh.vertex["curvatures"].numpy())
@@ -65,41 +65,41 @@ def lowMedHighCurvSegmentation(
 
     if exceptions:
         index = torch.Tensor(
-            list(set(range(on_surface_pts.shape[0])) - set(exceptions)),
+            list(set(range(on_surface_points.shape[0])) - set(exceptions)),
         ).int()
-        on_surface_pts = torch.index_select(
-            on_surface_pts, dim=0, index=index
+        on_surface_points = torch.index_select(
+            on_surface_points, dim=0, index=index
         )
 
-    curvatures = on_surface_pts[..., -1]
+    curvatures = on_surface_points[..., -1]
 
-    low_curvature_pts = on_surface_pts[(curvatures >= bin_edges[0]) & (curvatures < bin_edges[1]), ...]
-    low_curvature_idx = np.random.choice(
-        range(low_curvature_pts.shape[0]),
+    low_curv_points = on_surface_points[(curvatures >= bin_edges[0]) & (curvatures < bin_edges[1]), ...]
+    low_curv_idx = np.random.choice(
+        range(low_curv_points.shape[0]),
         size=int(math.floor(proportions[0] * n_samples)),
         replace=False
     )
-    on_surface_sampled = len(low_curvature_idx)
+    on_surface_sampled = len(low_curv_idx)
 
-    med_curvature_pts = on_surface_pts[(curvatures >= bin_edges[1]) & (curvatures < bin_edges[2]), ...]
-    med_curvature_idx = np.random.choice(
-        range(med_curvature_pts.shape[0]),
+    med_curv_points = on_surface_points[(curvatures >= bin_edges[1]) & (curvatures < bin_edges[2]), ...]
+    med_curv_idx = np.random.choice(
+        range(med_curv_points.shape[0]),
         size=int(math.ceil(proportions[1] * n_samples)),
         replace=False
     )
-    on_surface_sampled += len(med_curvature_idx)
+    on_surface_sampled += len(med_curv_idx)
 
-    high_curvature_pts = on_surface_pts[(curvatures >= bin_edges[2]) & (curvatures <= bin_edges[3]), ...]
-    high_curvature_idx = np.random.choice(
-        range(high_curvature_pts.shape[0]),
+    high_curv_points = on_surface_points[(curvatures >= bin_edges[2]) & (curvatures <= bin_edges[3]), ...]
+    high_curv_idx = np.random.choice(
+        range(high_curv_points.shape[0]),
         size=n_samples - on_surface_sampled,
         replace=False
     )
 
     return torch.cat((
-        low_curvature_pts[low_curvature_idx, ...],
-        med_curvature_pts[med_curvature_idx, ...],
-        high_curvature_pts[high_curvature_idx, ...]
+        low_curv_points[low_curv_idx, ...],
+        med_curv_points[med_curv_idx, ...],
+        high_curv_points[high_curv_idx, ...]
     ), dim=0)
 
 
@@ -249,8 +249,8 @@ def create_training_data(
         scene: o3d.t.geometry.RaycastingScene,
         no_sdf: bool = False,
         use_curvature: bool = False,
-        curvature_fracs: list = [],
-        curvature_threshs: list = [],
+        curv_fracs: list = [],
+        curv_threshs: list = [],
 ):
     """Creates a set of training data with coordinates, normals and SDF
     values.
@@ -284,17 +284,17 @@ def create_training_data(
         Indicates if we must use the curvature to perform sampling on surface
         points.
 
-    curvature_fracs: list, optional
+    curv_fracs: list, optional
         The fractions of points to sample per curvature band. Only used when
         `use_curvature` is True.
 
-    curvature_threshs: list
+    curv_threshs: list
         The curvature values to use when defining low, medium and high
         curvatures. Only used when `use_curvature` is True.
 
     Returns
     -------
-    training_pts: torch.Tensor
+    training_points: torch.Tensor
     training_normals: torch.Tensor
     training_sdf: torch.Tensor
 
@@ -302,55 +302,56 @@ def create_training_data(
     --------
     sample_on_surface, lowMedHighCurvSegmentation
     """
+
     if use_curvature:
-        surf_pts = lowMedHighCurvSegmentation(
+        surf_points = lowMedHighCurvSegmentation(
             mesh,
             n_on_surf,
-            curvature_threshs,
-            curvature_fracs,
+            curv_threshs,
+            curv_fracs,
             on_surf_exceptions
         )
     else:
-        surf_pts, _ = sample_on_surface(
+        surf_points, _ = sample_on_surface(
             mesh,
             n_on_surf,
             on_surf_exceptions
         )
-    surf_pts = torch.from_numpy(surf_pts.numpy())
+    surf_points = torch.from_numpy(surf_points.numpy())
 
-    domain_pts = np.random.uniform(
+    domain_points = np.random.uniform(
         domain_bounds[0], domain_bounds[1],
         (n_off_surf, 3)
     )
 
     if not no_sdf:
-        domain_pts = o3c.Tensor(domain_pts, dtype=o3c.Dtype.Float32)
-        domain_sdf = scene.compute_signed_distance(domain_pts)
+        domain_points = o3c.Tensor(domain_points, dtype=o3c.Dtype.Float32)
+        domain_sdf = scene.compute_signed_distance(domain_points)
         domain_sdf = torch.from_numpy(domain_sdf.numpy())
-        domain_pts = torch.from_numpy(domain_pts.numpy())
+        domain_points = torch.from_numpy(domain_points.numpy())
     else:
-        domain_pts = torch.from_numpy(domain_pts)
-        domain_sdf = -1 * torch.ones(domain_pts.shape[0])
+        domain_points = torch.from_numpy(domain_points)
+        domain_sdf = -1 * torch.ones(domain_points.shape[0])
 
-    domain_normals = torch.zeros_like(domain_pts)
+    domain_normals = torch.zeros_like(domain_points)
 
-    full_pts = torch.row_stack((
-        surf_pts[..., :3],
-        domain_pts
+    full_points = torch.row_stack((
+        surf_points[..., :3],
+        domain_points
     ))
     full_normals = torch.row_stack((
-        surf_pts[..., 3:6],
+        surf_points[..., 3:6],
         domain_normals
     ))
     full_sdf = torch.cat((
-        torch.zeros(len(surf_pts)),
+        torch.zeros(len(surf_points)),
         domain_sdf
     ))
 
-    return full_pts.float(), full_normals.float(), full_sdf.float()
+    return full_points.float(), full_normals.float(), full_sdf.float()
 
 
-def read_ply(path: str, with_curvatures=True):
+def read_ply(path: str, with_curv=True):
     """Reads a PLY file with position, normal and curvature info.
 
     Note that we expect the input ply to contain x,y,z vertex data, as well
@@ -378,7 +379,7 @@ def read_ply(path: str, with_curvatures=True):
     """
     # Reading the PLY file with curvature info
     n_columns = 6
-    if with_curvatures:
+    if with_curv:
         n_columns = 7
     with open(path, "rb") as f:
         plydata = PlyData.read(f)
@@ -390,7 +391,7 @@ def read_ply(path: str, with_curvatures=True):
         vertices[:, 3] = plydata["vertex"].data["nx"]
         vertices[:, 4] = plydata["vertex"].data["ny"]
         vertices[:, 5] = plydata["vertex"].data["nz"]
-        if with_curvatures:
+        if with_curv:
             vertices[:, 6] = plydata["vertex"].data["quality"]
         print(vertices.shape)
 
@@ -401,7 +402,7 @@ def read_ply(path: str, with_curvatures=True):
     mesh = o3d.t.geometry.TriangleMesh(device)
     mesh.vertex["positions"] = o3c.Tensor(vertices[:, :3], dtype=o3c.float32)
     mesh.vertex["normals"] = o3c.Tensor(vertices[:, 3:6], dtype=o3c.float32)
-    if with_curvatures:
+    if with_curv:
         mesh.vertex["curvatures"] = o3c.Tensor(vertices[:, -1], dtype=o3c.float32)
     mesh.triangle["indices"] = o3c.Tensor(faces, dtype=o3c.int32)
 
@@ -565,7 +566,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Comparison experiments for PLY-format meshes. This script is "
         "only for PLY meshes, for analytical SDF comparison, see "
-        "\"comparison_analytic.ply\"."
+        "\".ply\"."
     )
 
     parser.add_argument(
@@ -614,7 +615,7 @@ if __name__ == "__main__":
         help="Number of times to run the tests. Useful for statistics."
     )
     parser.add_argument(
-        "--curvature_percentiles", default=(70, 95), nargs="*",
+        "--curv_percentiles", default=(70, 95), nargs="*",
         help="Curvature percentiles to define low-medium and medium-high"
         " boundaries. Default values are 70, 95."
     )
@@ -654,7 +655,7 @@ if __name__ == "__main__":
         if mesh_data is None:
             raise ValueError(f"Invalid mesh provided \"{current_mesh}\".")
 
-        mesh, vertices = read_ply(mesh_data, with_curvatures=False)
+        mesh, vertices = read_ply(mesh_data, with_curv=False)
         min_bound = np.array([-1, -1, -1])
         max_bound = np.array([1, 1, 1])
 
@@ -669,31 +670,31 @@ if __name__ == "__main__":
         # Creating the test set
         N = vertices.shape[0]
 
-        test_surf_pts, test_surf_idx = sample_on_surface(
+        test_surf_points, test_surf_idx = sample_on_surface(
             mesh,
             args.test_points // 2,
         )
-        test_surf_pts = torch.from_numpy(test_surf_pts.numpy())
+        test_surf_points = torch.from_numpy(test_surf_points.numpy())
 
-        test_domain_pts = np.random.uniform(
+        test_domain_points = np.random.uniform(
             min_bound, max_bound,
             (args.test_points // 2, 3)
         )
-        test_domain_pts = o3c.Tensor(test_domain_pts, dtype=o3c.Dtype.Float32)
-        test_domain_sdf = scene.compute_signed_distance(test_domain_pts)
+        test_domain_points = o3c.Tensor(test_domain_points, dtype=o3c.Dtype.Float32)
+        test_domain_sdf = scene.compute_signed_distance(test_domain_points)
         test_domain_sdf = torch.from_numpy(test_domain_sdf.numpy())
-        test_domain_pts = torch.from_numpy(test_domain_pts.numpy())
+        test_domain_points = torch.from_numpy(test_domain_points.numpy())
 
-        test_pts = torch.row_stack((
-            test_surf_pts[..., :3],
-            test_domain_pts
+        test_points = torch.row_stack((
+            test_surf_points[..., :3],
+            test_domain_points
         ))
         test_normals = torch.row_stack((
-            test_surf_pts[..., 3:6],
-            torch.zeros_like(test_domain_pts)
+            test_surf_points[..., 3:6],
+            torch.zeros_like(test_domain_points)
         ))
         test_sdf = torch.cat((
-            torch.zeros(test_surf_pts.shape[0]),
+            torch.zeros(test_surf_points.shape[0]),
             torch.from_numpy(test_domain_sdf.numpy())
         ))
 
@@ -701,7 +702,7 @@ if __name__ == "__main__":
             training_stats = create_stats_dict(args.num_runs)
             i = 0
             while i < args.num_runs:
-                training_pts, _, training_sdf = create_training_data(
+                training_points, _, training_sdf = create_training_data(
                     mesh,
                     n_on_surf=round(args.batch_size * args.fraction_on_surface),
                     on_surf_exceptions=test_surf_idx,
@@ -714,7 +715,7 @@ if __name__ == "__main__":
 
                 start_training_time = time.time()
                 interp = RBFInterpolator(
-                    training_pts.detach().numpy(),
+                    training_points.detach().numpy(),
                     training_sdf.detach().numpy(),
                     kernel="cubic",
                     neighbors=300
@@ -722,16 +723,16 @@ if __name__ == "__main__":
                 training_time = time.time() - start_training_time
 
                 # Inference on the test data.
-                y_rbf = interp(test_pts.detach().numpy())
+                y_rbf = interp(test_points.detach().numpy())
                 n_rbf = torch.Tensor(
-                    [partial_derivative(interp, test_pts.detach().numpy()[j, :]) for j in range(args.test_points)]
+                    [partial_derivative(interp, test_points.detach().numpy()[j, :]) for j in range(args.test_points)]
                 )
                 errs = torch.abs(test_sdf.detach() - torch.from_numpy(y_rbf))
-                errs_on_surf = errs[:test_surf_pts.shape[0]]
-                errs_off_surf = errs[test_surf_pts.shape[0]:]
+                errs_on_surf = errs[:test_surf_points.shape[0]]
+                errs_off_surf = errs[test_surf_points.shape[0]:]
                 errs_normals = 1 - F.cosine_similarity(
-                    test_normals[:test_surf_pts.shape[0], ...],
-                    n_rbf[:test_surf_pts.shape[0], ...],
+                    test_normals[:test_surf_points.shape[0], ...],
+                    n_rbf[:test_surf_points.shape[0], ...],
                     dim=-1
                 )
                 print(f"RBF Results: MABSE {errs.mean():.3}"
@@ -781,7 +782,7 @@ if __name__ == "__main__":
                 # Start of the training loop
                 start_training_time = time.time()
                 for e in range(n_steps):
-                    training_pts, training_normals, training_sdf = \
+                    training_points, training_normals, training_sdf = \
                         create_training_data(
                             mesh,
                             n_on_surf=round(args.batch_size * args.fraction_on_surface),
@@ -793,7 +794,7 @@ if __name__ == "__main__":
                             use_curvature=False,
                         )
 
-                    training_pts = training_pts.to(device)
+                    training_points = training_points.to(device)
                     training_normals = training_normals.to(device)
                     training_sdf = training_sdf.to(device)
 
@@ -804,7 +805,7 @@ if __name__ == "__main__":
 
                     optim.zero_grad()
 
-                    y = model(training_pts)
+                    y = model(training_points)
                     loss = sdf_sitzmann(y, gt)
 
                     running_loss = torch.zeros((1, 1)).to(device)
@@ -831,15 +832,15 @@ if __name__ == "__main__":
                 # plt.savefig(f"loss_siren_{current_mesh}.png")
 
                 model.eval().cpu()
-                n_siren, curv_siren = grad_sdf(test_surf_pts[..., :3], model)
+                n_siren, curv_siren = grad_sdf(test_surf_points[..., :3], model)
                 with torch.no_grad():
-                    y_siren = model(test_pts)["model_out"].squeeze()
+                    y_siren = model(test_points)["model_out"].squeeze()
                     errs = torch.abs(test_sdf - y_siren)
-                    errs_on_surf = errs[:test_surf_pts.shape[0]]
-                    errs_off_surf = errs[test_surf_pts.shape[0]:]
+                    errs_on_surf = errs[:test_surf_points.shape[0]]
+                    errs_off_surf = errs[test_surf_points.shape[0]:]
 
                     errs_normals = 1 - F.cosine_similarity(
-                        test_normals[:test_surf_pts.shape[0], ...],
+                        test_normals[:test_surf_points.shape[0], ...],
                         n_siren,
                         dim=-1
                     )
@@ -892,7 +893,7 @@ if __name__ == "__main__":
                     vertices[:, -1],
                     [int(p) for p in args.curvature_percentiles]
                 )
-                curvature_threshs = [
+                curv_threshs = [
                     np.min(vertices[:, -1]),
                     l1,
                     l2,
@@ -909,7 +910,7 @@ if __name__ == "__main__":
                 # Start of the training loop
                 start_training_time = time.time()
                 for e in range(n_steps):
-                    training_pts, training_normals, training_sdf = \
+                    training_points, training_normals, training_sdf = \
                         create_training_data(
                             mesh,
                             n_on_surf=round(args.batch_size * args.fraction_on_surface),
@@ -919,11 +920,11 @@ if __name__ == "__main__":
                             scene=scene,
                             no_sdf=False,
                             use_curvature=True,
-                            curvature_fracs=(0.2, 0.6, 0.2),
-                            curvature_threshs=curvature_threshs
+                            curv_fracs=(0.2, 0.6, 0.2),
+                            curv_threshs=curv_threshs
                         )
 
-                    training_pts = training_pts.to(device)
+                    training_points = training_points.to(device)
                     training_normals = training_normals.to(device)
                     training_sdf = training_sdf.to(device)
 
@@ -934,8 +935,8 @@ if __name__ == "__main__":
 
                     optim.zero_grad()
 
-                    y = model(training_pts)
-                    loss = true_sdf(y, gt)
+                    y = model(training_points)
+                    loss = loss_true_sdf(y, gt)
 
                     running_loss = torch.zeros((1, 1)).to(device)
                     for k, v in loss.items():
@@ -960,15 +961,15 @@ if __name__ == "__main__":
                 # plt.savefig(f"loss_i3d_{current_mesh}.png")
 
                 model.eval().cpu()
-                n_i3d, curv_i3d = grad_sdf(test_surf_pts[..., :3], model)
+                n_i3d, curv_i3d = grad_sdf(test_surf_points[..., :3], model)
                 with torch.no_grad():
-                    y_i3d = model(test_pts)["model_out"].squeeze()
+                    y_i3d = model(test_points)["model_out"].squeeze()
                     errs = torch.abs(test_sdf - y_i3d)
-                    errs_on_surf = errs[:test_surf_pts.shape[0]]
-                    errs_off_surf = errs[test_surf_pts.shape[0]:]
+                    errs_on_surf = errs[:test_surf_points.shape[0]]
+                    errs_off_surf = errs[test_surf_points.shape[0]:]
 
                     errs_normals = 1 - F.cosine_similarity(
-                        test_normals[:test_surf_pts.shape[0], ...],
+                        test_normals[:test_surf_points.shape[0], ...],
                         n_i3d,
                         dim=-1
                     )
@@ -1025,7 +1026,7 @@ if __name__ == "__main__":
                 # Start of the training loop
                 start_training_time = time.time()
                 for e in range(n_steps):
-                    training_pts, training_normals, training_sdf = \
+                    training_points, training_normals, training_sdf = \
                         create_training_data(
                             mesh,
                             n_on_surf=round(args.batch_size * args.fraction_on_surface),
@@ -1036,7 +1037,7 @@ if __name__ == "__main__":
                             no_sdf=False,
                             use_curvature=False                        )
 
-                    training_pts = training_pts.to(device)
+                    training_points = training_points.to(device)
                     training_normals = training_normals.to(device)
                     training_sdf = training_sdf.to(device)
 
@@ -1047,8 +1048,8 @@ if __name__ == "__main__":
 
                     optim.zero_grad()
 
-                    y = model(training_pts)
-                    loss = true_sdf(y, gt)
+                    y = model(training_points)
+                    loss = loss_true_sdf(y, gt)
 
                     running_loss = torch.zeros((1, 1)).to(device)
                     for k, v in loss.items():
@@ -1073,15 +1074,15 @@ if __name__ == "__main__":
                 # plt.savefig(f"loss_i3d_{current_mesh}.png")
 
                 model.eval().cpu()
-                n_i3d, curv_i3d = grad_sdf(test_surf_pts[..., :3], model)
+                n_i3d, curv_i3d = grad_sdf(test_surf_points[..., :3], model)
                 with torch.no_grad():
-                    y_i3d = model(test_pts)["model_out"].squeeze()
+                    y_i3d = model(test_points)["model_out"].squeeze()
                     errs = torch.abs(test_sdf - y_i3d)
-                    errs_on_surf = errs[:test_surf_pts.shape[0]]
-                    errs_off_surf = errs[test_surf_pts.shape[0]:]
+                    errs_on_surf = errs[:test_surf_points.shape[0]]
+                    errs_off_surf = errs[test_surf_points.shape[0]:]
 
                     errs_normals = 1 - F.cosine_similarity(
-                        test_normals[:test_surf_pts.shape[0], ...],
+                        test_normals[:test_surf_points.shape[0], ...],
                         n_i3d,
                         dim=-1
                     )

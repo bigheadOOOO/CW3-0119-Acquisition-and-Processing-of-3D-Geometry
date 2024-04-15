@@ -1,5 +1,5 @@
 # coding: utf-8
-
+from typing import Optional, Tuple, Union, Callable
 import math
 import numpy as np
 import open3d as o3d
@@ -7,13 +7,9 @@ import open3d.core as o3c
 from plyfile import PlyData
 import torch
 from torch.utils.data import Dataset
+# from iso import levelset_sampling
 
-
-def _sample_on_surface(
-        vertices: torch.Tensor,
-        n_points: int,
-        device: str = torch.device("cpu"),
-) -> (torch.Tensor, torch.Tensor):
+def _sample_on_surface(vertices: torch.Tensor, n_points: int, device: str = torch.device("cpu")) -> (torch.Tensor, torch.Tensor):
     """Samples points in a torch tensor
 
     Parameters
@@ -48,14 +44,14 @@ def _sample_on_surface(
     return sampled, idx
 
 
-def _curvature_segmentation(
+def _curv_segmentation(
     vertices: torch.Tensor,
     n_samples: int,
     bin_edges: np.array,
     proportions: np.array,
     device: str = torch.device("cpu")
 ):
-    """Samples `n_points` points from `mesh` based on their curvature.
+    """Samples `n_points` points in the mesh based on their curvature.
 
     Parameters
     ----------
@@ -84,43 +80,43 @@ def _curvature_segmentation(
     samples: torch.Tensor
         The vertices sampled from `mesh`.
     """
-    curvatures = vertices[..., -2]
+    all_curvatures = vertices[..., -2]
 
-    low_curvature_pts = vertices[curvatures < bin_edges[1], ...]
-    med_curvature_pts = vertices[(curvatures >= bin_edges[1]) & (curvatures < bin_edges[2]), ...]
-    high_curvature_pts = vertices[curvatures >= bin_edges[2], ...]
+    # Assign vertices to buckets based on curvature
+    bins = torch.bucketize(all_curvatures.cpu(), torch.Tensor(bin_edges), right=True)
+    # print(bins)
+    # Sample from each bucket
+    samples = []
+    for i in range(len(bin_edges) - 1):
+        points_in_bin = vertices[bins == i+1]
+        if (i == 0):
+            n_low_curvature = int(math.floor(proportions[i] * n_samples))
+            n_samples_bin = n_low_curvature
+        elif (i == 1):
+            n_med_curvature = int(math.ceil(proportions[i] * n_samples))
+            n_samples_bin = n_med_curvature
+        else:
+            n_samples_bin = n_samples - (n_low_curvature + n_med_curvature)
+        sampled_idx = torch.randperm(points_in_bin.shape[0], device=device)[:n_samples_bin]
+        samples.append(points_in_bin[sampled_idx])
 
-    n_low_curvature = int(math.floor(proportions[0] * n_samples))
-    n_med_curvature = int(math.ceil(proportions[1] * n_samples))
-    n_high_curvature = n_samples - (n_low_curvature + n_med_curvature)
-
-    low_idx = torch.randperm(low_curvature_pts.shape[0], device=device)[:n_low_curvature]
-    med_idx = torch.randperm(med_curvature_pts.shape[0], device=device)[:n_med_curvature]
-    high_idx = torch.randperm(high_curvature_pts.shape[0], device=device)[:n_high_curvature]
-
-    return torch.row_stack((
-        low_curvature_pts[low_idx, ...],
-        med_curvature_pts[med_idx, ...],
-        high_curvature_pts[high_idx, ...]
-    ))
+    return torch.row_stack(samples)
 
 
-def _read_ply(path: str, with_curvatures: bool = False):
+def _read_ply(path: str, with_curv: bool = False):
     """Reads a PLY file with position, normal and, optionally curvature data.
 
-    Note that we expect the input ply to contain x,y,z vertex data, as well
-    as nx,ny,nz normal data and the curvature stored in the `quality` vertex
-    property, if `with_curvatures` is `True`, else we don't need the `quality`
-    attribute set.
+    ply file contains vertex data (x,y,z ), normal data ( nx,ny,nz) and the curvature stored in the `quality` vertex
+    property.
+    with_curv == True, set `quality` attribute.
 
     Parameters
     ----------
-    path: str, PathLike
-        Path to the ply file. We except the file to be in binary format.
+    path: str,
+        Path to the ply file.
 
-    with_curvatures: boolean, optional
-        Whether the PLY file has curvatures (and we should read them) or not.
-        Default value is False
+    with_curv: boolean, optional
+        If the PLY file has curvatures, read them.
 
     Returns
     -------
@@ -139,7 +135,7 @@ def _read_ply(path: str, with_curvatures: bool = False):
     """
     # Reading the PLY file with curvature info
     n_columns = 7  # x, y, z, nx, ny, nz, sdf
-    if with_curvatures:
+    if with_curv:
         n_columns = 8  # x, y, z, nx, ny, nz, curvature, sdf
     with open(path, "rb") as f:
         plydata = PlyData.read(f)
@@ -151,7 +147,7 @@ def _read_ply(path: str, with_curvatures: bool = False):
         vertices[:, 3] = plydata["vertex"].data["nx"]
         vertices[:, 4] = plydata["vertex"].data["ny"]
         vertices[:, 5] = plydata["vertex"].data["nz"]
-        if with_curvatures:
+        if with_curv:
             vertices[:, 6] = plydata["vertex"].data["quality"]
 
         faces = np.stack(plydata["face"].data["vertex_indices"])
@@ -161,7 +157,7 @@ def _read_ply(path: str, with_curvatures: bool = False):
     mesh = o3d.t.geometry.TriangleMesh(device)
     mesh.vertex["positions"] = o3c.Tensor(vertices[:, :3], dtype=o3c.float32)
     mesh.vertex["normals"] = o3c.Tensor(vertices[:, 3:6], dtype=o3c.float32)
-    if with_curvatures:
+    if with_curv:
         mesh.vertex["curvatures"] = o3c.Tensor(
             vertices[:, -2], dtype=o3c.float32
         )
@@ -179,13 +175,13 @@ def _create_training_data(
     device: torch.device = torch.device("cpu"),
     no_sdf: bool = False,
     use_curvature: bool = False,
-    curvature_fractions: list = [],
-    curvature_thresholds: list = [],
+    curv_fractions: list = [],
+    curv_thresholds: list = [],
 ):
     """Creates a set of training data with coordinates, normals and SDF
     values.
 
-    Parameters
+    Param
     ----------
     vertices: torch.tensor
         A mode-2 tensor with the mesh vertices.
@@ -208,25 +204,24 @@ def _create_training_data(
         torch.device("cpu").
 
     no_sdf: boolean, optional
-        If using SIREN's original loss, we do not query SDF for domain
-        points, instead we mark them with SDF = -1.
+        If using SIREN's original loss, set SDF = -1.
 
     use_curvature: boolean, optional
         Indicates if we must use the curvature to perform sampling on surface
         points. Note that we expect the curvature to be the second-to-last
         column in `vertices`.
 
-    curvature_fractions: list, optional
+    curv_fractions: list, optional
         The fractions of points to sample per curvature band. Only used when
         `use_curvature` is True.
 
-    curvature_thresholds: list
+    curv_thresholds: list
         The curvature values to use when defining low, medium and high
         curvatures. Only used when `use_curvature` is True.
 
     Returns
     -------
-    full_pts: torch.Tensor
+    full_points: torch.Tensor
         A tensor with the points sampled from the surface concatenated with the
         off-surface points.
 
@@ -242,49 +237,45 @@ def _create_training_data(
     --------
     _sample_on_surface, _lowMedHighCurvSegmentation
     """
+    # project
+    # projector = levelset_sampling.UniformProjection(
+    #     max_points_per_pass=16000, proj_max_iters=10,
+        # proj_tolerance=5e-5, knn_k=8)
+    # Sample points on the surface
     if use_curvature:
-        surf_pts = _curvature_segmentation(
-            vertices, n_on_surf, curvature_thresholds, curvature_fractions,
+        surf_points = _curv_segmentation(
+            vertices, n_on_surf, curv_thresholds, curv_fractions,
             device=device
         )
     else:
-        surf_pts, _ = _sample_on_surface(
-            vertices,
-            n_on_surf,
-            device=device
-        )
+        surf_points, _ = _sample_on_surface(vertices, n_on_surf, device=device)
 
     coord_dict = {
-        "on_surf": [surf_pts[..., :3],
-                    surf_pts[..., 3:6],
-                    surf_pts[..., -1]]
+        "on_surf": [surf_points[..., :3], surf_points[..., 3:6], surf_points[..., -1]]
     }
 
     if n_off_surf > 0:
-        domain_pts = np.random.uniform(
+        domain_points = np.random.uniform(
             domain_bounds[0], domain_bounds[1],
             (n_off_surf, 3)
         )
 
-        if no_sdf is False:
-            domain_pts = o3c.Tensor(domain_pts, dtype=o3c.Dtype.Float32)
-            domain_sdf = scene.compute_signed_distance(domain_pts)
-            domain_sdf = torch.from_numpy(domain_sdf.numpy())
-            domain_pts = torch.from_numpy(domain_pts.numpy())
+        if not no_sdf:
+            domain_points = o3c.Tensor(domain_points, dtype=o3c.Dtype.Float32)
+            domain_sdf = torch.from_numpy(scene.compute_signed_distance(domain_points).numpy())
+            domain_points = torch.from_numpy(domain_points.numpy())
         else:
-            domain_sdf = torch.full(
-                (n_off_surf, 1), fill_value=-1, device=device
-            )
+            domain_sdf = torch.full((n_off_surf, 1), fill_value=-1, device=device)
 
-        domain_pts = torch.from_numpy(domain_pts.numpy()).to(device)
+        domain_points = torch.tensor(domain_points, device=device)
         coord_dict["off_surf"] = [
-            domain_pts, torch.zeros_like(domain_pts, device=device), domain_sdf
+            domain_points, torch.zeros_like(domain_points, device=device), domain_sdf
         ]
 
     return coord_dict
 
 
-def _calc_curvature_bins(curvatures: torch.Tensor, percentiles: list) -> list:
+def _calc_curv_bins(curvatures: torch.Tensor, percentiles: list) -> list:
     """Bins the curvature values according to `percentiles`.
 
     Parameters
@@ -358,11 +349,11 @@ class PointCloud(Dataset):
         Indicates if we must use the curvature to perform sampling on surface
         points. By default this is False.
 
-    curvature_fractions: list, optional
+    curv_fractions: list, optional
         The fractions of points to sample per curvature band. Only used when
         `use_curvature` is True.
 
-    curvature_percentiles: list, optional
+    curv_percentiles: list, optional
         The curvature percentiles to use when defining low, medium and high
         curvatures. Only used when `use_curvature` is True.
 
@@ -380,12 +371,12 @@ class PointCloud(Dataset):
                  off_surface_sdf: float = None,
                  off_surface_normals: torch.Tensor = None,
                  use_curvature: bool = False,
-                 curvature_fractions: list = [],
-                 curvature_percentiles: list = [],
+                 curv_fractions: list = [],
+                 curv_percentiles: list = [],
                  device=torch.device("cpu")):
         super().__init__()
         self.use_curvature = use_curvature
-        self.curvature_fractions = curvature_fractions
+        self.curv_fractions = curv_fractions
         self.batch_size = batch_size
         self.off_surface_normals = None
         self.off_surface_sdf = off_surface_sdf
@@ -398,7 +389,7 @@ class PointCloud(Dataset):
         print(f"Loading mesh \"{mesh_path}\".")
         print("Using curvatures? ", "YES" if use_curvature else "NO")
         mesh, vertices = _read_ply(
-            mesh_path, with_curvatures=use_curvature
+            mesh_path, with_curv=use_curvature
         )
         self.vertices = vertices.to(device)
         if not batch_size:
@@ -413,11 +404,11 @@ class PointCloud(Dataset):
             self.scene.add_triangles(mesh)
 
         # Binning the curvatures
-        self.curvature_bins = None
+        self.curv_bins = None
         if use_curvature:
-            self.curvature_bins = _calc_curvature_bins(
+            self.curv_bins = _calc_curv_bins(
                 self.vertices[:, -2],
-                curvature_percentiles
+                curv_percentiles
             )
 
         self.samples = torch.zeros((self.batch_size, 7), device=device)
@@ -437,10 +428,9 @@ class PointCloud(Dataset):
             device=self.device,
             no_sdf=self.off_surface_sdf is not None,
             use_curvature=self.use_curvature,
-            curvature_fractions=self.curvature_fractions,
-            curvature_thresholds=self.curvature_bins
+            curv_fractions=self.curv_fractions,
+            curv_thresholds=self.curv_bins
         )
-
         self.samples[:nonsurf, :3] = samples["on_surf"][0]
         self.samples[:nonsurf, 3:6] = samples["on_surf"][1]
         self.samples[:nonsurf, -1] = samples["on_surf"][2]
@@ -473,11 +463,11 @@ class PointCloudDeferredSampling(PointCloud):
         Indicates if we must use the curvature to perform sampling on surface
         points. By default this is False.
 
-    curvature_fractions: list, optional
+    curv_fractions: list, optional
         The fractions of points to sample per curvature band. Only used when
         `use_curvature` is True.
 
-    curvature_percentiles: list, optional
+    curv_percentiles: list, optional
         The curvature percentiles to use when defining low, medium and high
         curvatures. Only used when `use_curvature` is True.
 
@@ -489,17 +479,25 @@ class PointCloudDeferredSampling(PointCloud):
     PointCloud
     """
     def __init__(
-            self, mesh_path: str, batch_size: int, use_curvature: bool = False,
-            curvature_fractions: list = [], curvature_percentiles: list = [],
+            self, mesh_path: str, cfg, batch_size: int, use_curvature: bool = False,
+            curv_fractions: list = [], curv_percentiles: list = [],
             device=torch.device("cpu")
     ):
         super(PointCloudDeferredSampling, self).__init__(
             mesh_path, batch_size, use_curvature=use_curvature,
-            curvature_fractions=curvature_fractions,
-            curvature_percentiles=curvature_percentiles,
+            curv_fractions=curv_fractions,
+            curv_percentiles=curv_percentiles,
             device=device
         )
         self.refresh_sdf = True
+        # The [beta] that controlls how smooth/sharp the output shape should be
+        # If beta >  1, then the output shape will increase in curvature
+        #               so it will be sharper
+        # If beta < 1, then the output shape will decrease in curvature
+        #               so it will be smoother.
+        # beta should be > 0.
+        self.cfg = cfg
+        self.beta = getattr(self.cfg["NFGP"], "beta", 1.)
 
     def __getitem__(self, _):
         """Returns a batch of points to the caller."""
@@ -513,9 +511,10 @@ class PointCloudDeferredSampling(PointCloud):
                 scene=self.scene,
                 device=self.device,
                 use_curvature=self.use_curvature,
-                curvature_fractions=self.curvature_fractions,
-                curvature_thresholds=self.curvature_bins
+                curv_fractions=self.curv_fractions,
+                curv_thresholds=self.curv_bins
             )
+
             off_surf_samples = samples["off_surf"]
             off_surf_samples = [v.to(self.device) for v in off_surf_samples]
             self.samples[noffsurf:, :3] = off_surf_samples[0]
@@ -530,8 +529,8 @@ class PointCloudDeferredSampling(PointCloud):
                 scene=self.scene,
                 device=self.device,
                 use_curvature=self.use_curvature,
-                curvature_fractions=self.curvature_fractions,
-                curvature_thresholds=self.curvature_bins
+                curv_fractions=self.curv_fractions,
+                curv_thresholds=self.curv_bins
             )
 
         self.samples[:nonsurf, :3] = samples["on_surf"][0]
@@ -547,9 +546,10 @@ class PointCloudDeferredSampling(PointCloud):
 
 
 if __name__ == "__main__":
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     p = PointCloud(
         "data/armadillo_curvs.ply", batch_size=10, use_curvature=True,
-        curvature_fractions=(0.2, 0.7, 0.1), curvature_percentiles=(70, 95)
+        curv_fractions=(0.2, 0.7, 0.1), curv_percentiles=(70, 95)
     )
     print(len(p))
     print(p.__getitem__(0))

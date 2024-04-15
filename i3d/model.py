@@ -11,6 +11,7 @@ import numpy as np
 def sine_init(m, w0):
     if hasattr(m, 'weight'):
         num_input = m.weight.size(-1)
+        print(num_input)
         m.weight.uniform_(-np.sqrt(6 / num_input) / w0,
                           np.sqrt(6 / num_input) / w0)
 

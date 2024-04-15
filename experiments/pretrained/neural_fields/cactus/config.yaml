@@ -1,0 +1,43 @@
+!!python/object:argparse.Namespace
+data: !!python/object:argparse.Namespace
+  num_workers: 4
+  path: data/cactus/sdf.npy
+  train: !!python/object:argparse.Namespace
+    batch_size: 1
+    length: 10000
+    num_sample_points: 10000
+  type: datasets.single_shape_sdf_datasets
+  val: !!python/object:argparse.Namespace
+    batch_size: 1
+    length: 1
+    num_sample_points: 10000
+log_dir: logs/cactus_2021-Nov-15-16-10-31
+log_name: logs/cactus_2021-Nov-15-16-10-31
+models: !!python/object:argparse.Namespace
+  decoder: !!python/object:argparse.Namespace
+    dim: 3
+    hidden_size: 512
+    n_blocks: 5
+    out_dim: 1
+    type: models.siren_mlp
+    z_dim: 1
+save_dir: logs/cactus_2021-Nov-15-16-10-31
+trainer: !!python/object:argparse.Namespace
+  epochs: 100
+  grad_norm_num_points: 10000
+  grad_norm_weight: 1e-2
+  ndf_loss_weight: 0.0
+  opt: !!python/object:argparse.Namespace
+    beta1: 0.9
+    beta2: 0.999
+    lr: 1e-5
+    type: adam
+    weight_decay: 0.0
+  sdf_loss_weight: 1.0
+  seed: 100
+  type: trainers.nf_sdf_trainer_3D
+viz: !!python/object:argparse.Namespace
+  log_freq: 10
+  save_freq: 1
+  val_freq: 1
+  viz_freq: 10000

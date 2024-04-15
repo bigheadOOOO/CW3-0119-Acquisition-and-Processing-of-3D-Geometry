@@ -133,7 +133,7 @@ def principal_directions(grad, hess):
     return dir_min/len_min, dir_max/len_max
 
 
-def principal_curvature_parallel_surface(Kmin, Kmax, t, eps=1e-6):
+def principal_curv_parallel_surface(Kmin, Kmax, t, eps=1e-6):
     Kg = Kmin*Kmax
     Km = 0.5*(Kmin+Kmax)
 
@@ -155,7 +155,7 @@ def principal_curvature_parallel_surface(Kmin, Kmax, t, eps=1e-6):
     return newKmin, newKmax
 
 
-def principal_curvature_region_detection(y, x):
+def principal_curv_region_detection(y, x):
     grad = gradient(y, x)
     hess = hessian(y, x)
 
@@ -199,7 +199,7 @@ def gauss_bonnet_integral(grad, hess):
     Kg = gaussian_curvature(grad, hess).unsqueeze(-1)
 
     # remenber to restrict to the surface
-    # Kg = torch.where(gt_sdf != -1, Kg, torch.zeros_like(Kg))
+    # Kg = torch.where(ground_truth_sdf != -1, Kg, torch.zeros_like(Kg))
 
     aux = gradient.squeeze(-1)/torch.abs(gradient[:, :, 0].unsqueeze(-1))
 
@@ -208,33 +208,30 @@ def gauss_bonnet_integral(grad, hess):
 
 
 def hessian(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """Hessian of y wrt x
+    """
+        Hessian of y wrt x
 
-    Parameters
-    ----------
-    y: torch.Tensor
-        Shape [B, N, D_out], where B is the batch size (usually 1), N is the
-        number of points, and D_out is the number of output channels of the
-        network.
+        Parameters
+        ----------
+        y: torch.Tensor
+            Shape [batch size, number of points, number of output channels]
 
-    x: torch.Tensor
-        Shape [B, N, D_in],  where B is the batch size (usually 1), N is the
-        number of points, and D_in is the number of input channels of the
-        network.
+        x: torch.Tensor
+            Shape [batch size, number of points, number of input channels]
 
-    Returns
-    -------
-    h: torch.Tensor
-        Shape: [B, N, D_out, D_in, D_in]
+        Returns
+        -------
+        h: torch.Tensor
+            Shape: [batch size, number of points, number of output channels, number of input channels, number of input channels]
     """
     meta_batch_size, num_observations = y.shape[:2]
-    grad_y = torch.ones_like(y[..., 0]).to(y.device)
-    h = torch.zeros(meta_batch_size, num_observations, y.shape[-1], x.shape[-1], x.shape[-1]).to(y.device)
+    grad_y = torch.ones_like(y[..., 0], device=y.device)
+    h = torch.zeros(meta_batch_size, num_observations, y.shape[-1], x.shape[-1], x.shape[-1], device=y.device)
     for i in range(y.shape[-1]):
-        # calculate dydx over batches for each feature value of y
+        # Compute first-order gradients
         dydx = grad(y[..., i], x, grad_y, create_graph=True)[0]
 
-        # calculate hessian on y for each x value
+        # Compute second-order gradients (Hessian)
         for j in range(x.shape[-1]):
             tmp = grad(dydx[..., j], x, grad_y, create_graph=True)
             h[..., i, j, :] = tmp[0].unsqueeze(1)[..., :]
@@ -266,37 +263,36 @@ def gradient(y, x, grad_outputs=None):
 
 
 def jacobian(y: torch.Tensor, x: torch.Tensor):
-    """Jacobian of y wrt x.
+    """
+        Jacobian of y wrt x.
 
-    Parameters
-    ----------
-    y: torch.Tensor
-        A [B, N, D_out] tensor with the outputs of f(x)
+        Parameters
+        ----------
+        y: torch.Tensor
+            the outputs of f(x)
 
-    x: torch.Tensor
-        A [B, N, D_in] tensor such that f(x) = y
+        x: torch.Tensor
+            f(x) = y
 
-    Returns
-    -------
-    jac: torch.Tensor
-        A [B, N, D_out, D_in] tensor with the jacobian of y wrt x.
+        Returns
+        -------
+        jac: torch.Tensor
+            A [B, N, D_out, D_in] tensor with the jacobian of y wrt x.
 
-    status: int
-        -1 if any NaN were introduced by the calculations, 0 otherwise
+        status: int
+            -1 if any NaN were introduced by the calculations, 0 otherwise
     """
     meta_batch_size, num_observations = y.shape[:2]
     jac = torch.zeros(
-        meta_batch_size, num_observations, y.shape[-1], x.shape[-1]
-    ).to(y.device)  # (meta_batch_size*num_points, 2, 2)
+        meta_batch_size, num_observations, y.shape[-1], x.shape[-1], device=y.device)
     for i in range(y.shape[-1]):
-        # calculate dydx over batches for each feature value of y
         y_flat = y[..., i].view(-1, 1)
-        jac[:, :, i, :] = grad(
-            y_flat, x, torch.ones_like(y_flat), create_graph=True
-        )[0]
+        # Compute gradients
+        gradients = grad(y_flat, x, torch.ones_like(y_flat), create_graph=True)[0]
+        # Check for NaNs
+        if torch.isnan(gradients).any():
+            return jac, -1
 
-    status = 0
-    if torch.any(torch.isnan(jac)):
-        status = -1
+        jac[:, :, i, :] = gradients
 
-    return jac, status
+    return jac, 0
