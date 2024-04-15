@@ -16,90 +16,107 @@ import numpy as np
 import torch
 from torch.nn.utils import parameters_to_vector
 from i3d.dataset import PointCloudDeferredSampling
-from i3d.loss_functions import true_sdf
+from i3d.loss_functions import loss_true_sdf
 from i3d.model import SIREN
 
+# TODO: NFGP IMPORT
+from NFGP import single_shape_sdf_datasets, igp_wrapper, siren_mlp, log
+from i3d import loss_functions
+from torch.utils.tensorboard import SummaryWriter
 
-if __name__ == "__main__":
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+#TODO: NFGP END
 
+def get_args(): 
     parser = argparse.ArgumentParser(
         description="Experiments with SDF querying at regular intervals."
     )
-    parser.add_argument(
-        "meshpath",
-        help="Path to the mesh to use for training. We only handle PLY files."
-    )
-    parser.add_argument(
-        "outputpath",
-        help="Path to the output folder (will be created if necessary)."
-    )
-    parser.add_argument(
-        "configpath",
-        help="Path to the configuration file with the network's description."
-    )
-    parser.add_argument(
+    # Define groups
+    required_parser = parser.add_argument_group('required arguments')
+    optional_parser = parser.add_argument_group('optional arguments')
+    siren_parser = parser.add_argument_group('SIREN parameters')
+    sampling_parser = parser.add_argument_group('Sampling parameters')
+    # Define parameter lists
+    required_args = ["meshplypath", "outputpath", "configpath"]
+    # Add mandatory parameters of string type
+    for arg in required_args:
+        required_parser.add_argument(arg, help=arg)
+    # Add optional parameters
+    optional_parser.add_argument(
         "--device", "-d", type=str, default="cuda:0",
         help="The device to perform the training on. Uses CUDA:0 by default."
     )
-    parser.add_argument(
+    optional_parser.add_argument(
         "--nepochs", "-n", type=int, default=0,
         help="Number of training epochs for each mesh."
     )
-    parser.add_argument(
-        "--omega0", "-o", type=int, default=0,
-        help="SIREN Omega 0 parameter."
-    )
-    parser.add_argument(
-        "--omegaW", "-w", type=int, default=0,
-        help="SIREN Omega 0 parameter for hidden layers."
-    )
-    parser.add_argument(
-        "--hidden-layer-config", type=int, nargs='+', default=[],
-        help="SIREN neurons per layer. By default we fetch it from the"
-        " configuration file."
-    )
-    parser.add_argument(
+    optional_parser.add_argument(
         "--batchsize", "-b", type=int, default=0,
         help="# of points to fetch per iteration. By default, uses the # of"
         " mesh vertices."
     )
-    parser.add_argument(
+    optional_parser.add_argument(
         "--resample-sdf-at", "-r", type=int, default=0,
         help="Recalculates the SDF for off-surface points at every N epochs."
         " By default (0) we calculate the SDF at every iteration."
     )
-    parser.add_argument(
+    optional_parser.add_argument(
+        "--seed", type=int, default=0, help="RNG seed to use."
+    )
+    # Add SIREN parameters
+    siren_parser.add_argument(
+        "--omega0", "-o", type=int, default=0,
+        help="SIREN Omega 0 parameter."
+    )
+    siren_parser.add_argument(
+        "--omegaW", "-w", type=int, default=0,
+        help="SIREN Omega 0 parameter for hidden layers."
+    )
+    siren_parser.add_argument(
+        "--hidden-layer-config", type=int, nargs='+', default=[],
+        help="SIREN neurons per layer. By default we fetch it from the"
+        " configuration file."
+    )
+    # Add Sampling parameters
+    sampling_parser.add_argument(
         "--sampling", "-s", type=str, default="uniform",
         help="Uniform (\"uniform\", default value) or curvature-based"
         " (\"curvature\") sampling."
     )
-    parser.add_argument(
+    sampling_parser.add_argument(
         "--curvature-fractions", type=float, nargs='+', default=[],
         help="Fractions of data to fetch for each curvature bin. Only used"
         " with \"--sampling curvature\" argument, or when sampling type is"
         " \"curvature\" in the configuration file."
     )
-    parser.add_argument(
+    sampling_parser.add_argument(
         "--curvature-percentiles", type=float, nargs='+', default=[],
         help="The curvature percentiles to use when defining the bins. Only"
         " used with \"--sampling curvature\" argument, or when sampling type"
         " is \"curvature\" in the configuration file."
     )
-    parser.add_argument(
-        "--seed", type=int, default=0, help="RNG seed to use."
-    )
-    args = parser.parse_args()
+    # NFGP
+    parser.add_argument('--resume', default=False, action='store_true')
+    parser.add_argument('--pretrained', default=None, type=str,
+                        help="Pretrained cehckpoint")
+    return parser.parse_args()
 
+
+if __name__ == "__main__":
+    # The generated convolutional algorithm will remain consistent every time the same code is run, ensuring consistency in the results
+    torch.backends.cudnn.deterministic = True
+    # Ensure consistent results between different runs.
+    torch.backends.cudnn.benchmark = False
+
+    args = get_args()
+    
     if not osp.exists(args.configpath):
         raise FileNotFoundError(
             f"Experiment configuration file \"{args.configpath}\" not found."
         )
 
-    if not osp.exists(args.meshpath):
+    if not osp.exists(args.meshplypath):
         raise FileNotFoundError(
-            f"Mesh file \"{args.meshpath}\" not found."
+            f"Mesh file \"{args.meshplypath}\" not found."
         )
 
     with open(args.configpath, "r") as fin:
@@ -150,27 +167,73 @@ if __name__ == "__main__":
         withcurvature = True
         config["sampling"]["type"] = "curvature"
 
-    curvature_fractions = []
-    curvature_percentiles = []
+    curv_fractions = []
+    curv_percentiles = []
     if withcurvature:
-        curvature_fractions = config["sampling"].get(
-            "curvature_fractions", [0.2, 0.6, 0.2]
+        curv_fractions = config["sampling"].get(
+            "curv_fractions", [0.2, 0.6, 0.2]
         )
-        curvature_percentiles = config["sampling"].get(
-            "curvature_percentiles", [0.7, 0.95]
+        curv_percentiles = config["sampling"].get(
+            "curv_percentiles", [0.7, 0.95]
         )
         if args.curvature_fractions:
-            curvature_fractions = [float(f) for f in args.curvature_fractions]
-            config["sampling"]["curvature_fractions"] = curvature_fractions
+            curv_fractions = [float(f) for f in args.curvature_fractions]
+            config["sampling"]["curv_fractions"] = curv_fractions
         if args.curvature_percentiles:
-            curvature_percentiles = \
+            curv_percentiles = \
                 [float(p) for p in args.curvature_percentiles]
-            config["sampling"]["curvature_percentiles"] = curvature_percentiles
+            config["sampling"]["curv_percentiles"] = curv_percentiles
+
+    # TODO: NFGP BEGIN
+    start_epoch = 0
+    start_time = time.time()
+
+    boundary_loss_weight = float(getattr(
+        config["NFGP"], "boundary_weight", 1.))
+    boundary_loss_num_points = int(getattr(
+        config["NFGP"], "boundary_num_points", 0))
+    boundary_loss_points_update_step = int(getattr(
+        config["NFGP"], "boundary_loss_points_update_step", 1))
+    boundary_loss_use_surf_points = int(getattr(
+        config["NFGP"], "boundary_loss_use_surf_points", True))
+    lap_loss_weight = float(getattr(
+        config["NFGP"], "lap_loss_weight", 1e-4))
+    lap_loss_threshold = int(getattr(
+        config["NFGP"], "lap_loss_threshold", 50))
+    lap_loss_num_points = int(getattr(
+        config["NFGP"], "lap_loss_num_points", 5000))
+    grad_norm_weight = float(getattr(
+        config["NFGP"], "grad_norm_weight", 1e-2))
+    grad_norm_num_points = int(getattr(
+        config["NFGP"], "grad_norm_num_points", 5000))
+    beta = float(getattr(
+        config["NFGP"], "beta", 1e-2))
+
+    original_decoder = siren_mlp.Net(config, config["NFGP"]["models"]["decoder"])
+    original_decoder.cuda()
+    original_decoder.load_state_dict(
+        torch.load(config["NFGP"]["models"]["decoder"]["path"])['net'])
+    print("Original Decoder:")
+    print(original_decoder)
+    wrapper_type = getattr(
+        config["NFGP"], "wrapper_type", "distillation")
+
+    if not hasattr(config["NFGP"]["models"], "net"):
+            config["NFGP"]["models"]["net"] = config["NFGP"]["models"]["decoder"]
+
+    if wrapper_type in ['distillation']:
+        decoder, opt_dec, scheduler_dec = igp_wrapper.distillation(
+            config, original_decoder,
+            reload=getattr(config["NFGP"], "reload_decoder", True))
+    writer = SummaryWriter(log_dir=getattr(
+        config["NFGP"], "log_name", None))
+
+    # TODO: NFGP END
 
     dataset = PointCloudDeferredSampling(
-        args.meshpath, batch_size=BATCH, use_curvature=withcurvature,
-        device=device, curvature_fractions=curvature_fractions,
-        curvature_percentiles=curvature_percentiles
+        args.meshplypath, config, batch_size=BATCH, use_curvature=withcurvature,
+        device=device, curv_fractions=curv_fractions,
+        curv_percentiles=curv_percentiles
     )
     N = dataset.vertices.shape[0]
 
@@ -223,8 +286,9 @@ if __name__ == "__main__":
         gt = samples[1]
 
         optim.zero_grad(set_to_none=True)
+        # train
         y = model(samples[0]["coords"])
-        loss = true_sdf(y, gt)
+        loss = loss_true_sdf(y, gt)
 
         running_loss = torch.zeros((1, 1), device=device)
         for k, v in loss.items():
@@ -245,6 +309,60 @@ if __name__ == "__main__":
         if not step % 100 and step > 0:
             print(f"Step {step} --- Loss {running_loss.item()}")
 
+    # TODO: NFGP, UPDATE LOSS FOR SMOOTHING
+    sdf_data = y
+    loaders = single_shape_sdf_datasets.get_data_loaders(config["data"], args)
+    train_loader = loaders['train_loader']
+    test_loader = loaders['test_loader']
+    for epoch in range(start_epoch, config["NFGP"]["epochs"] + start_epoch):
+        # train for one epoch
+        print(epoch)
+        loader_start = time.time()
+        for bidx, data in enumerate(train_loader):
+            print(bidx)
+            loader_duration = time.time() - loader_start
+            step = bidx + len(train_loader) * epoch + 1
+            logs_info = loss_functions.smoothing_loss(original_decoder, decoder, opt_dec, beta,
+                   num_update_step=epoch, boundary_loss_weight=boundary_loss_weight,
+                   boundary_loss_num_points=boundary_loss_num_points,
+                   boundary_loss_points_update_step=boundary_loss_points_update_step,
+                   boundary_loss_use_surf_points=boundary_loss_use_surf_points,
+                   grad_norm_weight=grad_norm_weight,
+                   grad_norm_num_points=grad_norm_num_points,
+                   lap_loss_weight=lap_loss_weight,
+                   lap_loss_threshold=lap_loss_threshold,
+                   lap_loss_num_points=lap_loss_num_points
+                   )
+            # if step % int(cfg.viz.log_freq) == 0 and int(cfg.viz.log_freq) > 0:
+            duration = time.time() - start_time
+            start_time = time.time()
+            print("Epoch %d Batch [%2d/%2d] "
+                  " Loss %2.5f"
+                  % (epoch, bidx, len(train_loader), logs_info['loss']))
+            visualize = step % int(config["viz"]["viz_freq"]) == 0 and \
+                        int(config["viz"]["viz_freq"]) > 0
+            log.log_train(
+                logs_info, config["NFGP"], data, decoder, epoch,
+                writer=writer, epoch=epoch, step=step, visualize=visualize)
+
+    #         # Reset loader time
+            loader_start = time.time()
+    #
+        # Save first so that even if the visualization bugged,
+        # we still have something
+        # if (epoch + 1) % int(config["NFGP"]["viz"]["save_freq"]) == 0 and \
+                # int(config["NFGP"]["viz"]["save_freq"]) > 0:
+            # trainer.save(epoch=epoch, step=step)
+    #
+    #     if (epoch + 1) % int(cfg.viz.val_freq) == 0 and \
+    #             int(cfg.viz.val_freq) > 0:
+    #         val_info = trainer.validate(test_loader, epoch=epoch)
+    #         trainer.log_val(val_info, writer=writer, epoch=epoch)
+    #
+    #     # Signal the trainer to cleanup now that an epoch has ended
+    #     trainer.epoch_end(epoch, writer=writer)
+    # trainer.save(epoch=epoch, step=step)
+    # # TODO: NFGP END
     training_time = time.time() - start_training_time
     print(f"Training took {training_time} s")
     print(f"Best loss value {best_loss} at step {best_step}")
