@@ -23,11 +23,11 @@ import open3d.core as o3c
 from plyfile import PlyData
 import torch
 from torch.nn.utils import parameters_to_vector
-from i3d.loss_functions import true_sdf
+from i3d.loss_functions import loss_true_sdf
 from i3d.model import SIREN
 
 
-def curvature_segmentation(
+def curv_segmentation(
     vertices: torch.Tensor,
     n_samples: int,
     bin_edges: np.array,
@@ -63,22 +63,22 @@ def curvature_segmentation(
     curvatures = vertices[..., -2]
 
     # TODO: Da pra fazer na inicialização
-    low_curvature_pts = vertices[curvatures < bin_edges[1], ...]
-    med_curvature_pts = vertices[(curvatures >= bin_edges[1]) & (curvatures < bin_edges[2]), ...]
-    high_curvature_pts = vertices[curvatures >= bin_edges[2], ...]
+    low_curv_points = vertices[curvatures < bin_edges[1], ...]
+    med_curv_points = vertices[(curvatures >= bin_edges[1]) & (curvatures < bin_edges[2]), ...]
+    high_curv_points = vertices[curvatures >= bin_edges[2], ...]
 
     n_low_curvature = int(math.floor(proportions[0] * n_samples))
     n_med_curvature = int(math.ceil(proportions[1] * n_samples))
     n_high_curvature = n_samples - (n_low_curvature + n_med_curvature)
 
-    low_idx = torch.randperm(low_curvature_pts.shape[0], device=device)[:n_low_curvature]
-    med_idx = torch.randperm(med_curvature_pts.shape[0], device=device)[:n_med_curvature]
-    high_idx = torch.randperm(high_curvature_pts.shape[0], device=device)[:n_high_curvature]
+    low_idx = torch.randperm(low_curv_points.shape[0], device=device)[:n_low_curvature]
+    med_idx = torch.randperm(med_curv_points.shape[0], device=device)[:n_med_curvature]
+    high_idx = torch.randperm(high_curv_points.shape[0], device=device)[:n_high_curvature]
 
     ret = torch.row_stack((
-        low_curvature_pts[low_idx, ...],
-        med_curvature_pts[med_idx, ...],
-        high_curvature_pts[high_idx, ...]
+        low_curv_points[low_idx, ...],
+        med_curv_points[med_idx, ...],
+        high_curv_points[high_idx, ...]
     ))
 
     return ret
@@ -133,8 +133,8 @@ def create_training_data(
     device: torch.device = torch.device("cpu"),
     no_sdf: bool = False,
     use_curvature: bool = False,
-    curvature_fracs: list = [],
-    curvature_threshs: list = [],
+    curv_fracs: list = [],
+    curv_threshs: list = [],
 ):
     """Creates a set of training data with coordinates, normals and SDF
     values.
@@ -169,11 +169,11 @@ def create_training_data(
         points. Note that we expect the curvature to be the second-to-last
         column in `vertices`.
 
-    curvature_fracs: list, optional
+    curv_fracs: list, optional
         The fractions of points to sample per curvature band. Only used when
         `use_curvature` is True.
 
-    curvature_threshs: list
+    curv_threshs: list
         The curvature values to use when defining low, medium and high
         curvatures. Only used when `use_curvature` is True.
 
@@ -188,35 +188,35 @@ def create_training_data(
 
     See Also
     --------
-    sample_on_surface, curvature_segmentation
+    sample_on_surface, curv_segmentation
     """
     if use_curvature:
-        surf_pts = curvature_segmentation(
-            vertices, n_on_surf, curvature_threshs, curvature_fracs,
+        surf_points = curv_segmentation(
+            vertices, n_on_surf, curv_threshs, curv_fracs,
             device=device
         )
     else:
-        surf_pts, _ = sample_on_surface(
+        surf_points, _ = sample_on_surface(
             vertices,
             n_on_surf,
             device=device
         )
 
     coord_dict = {
-        "on_surf": [surf_pts[..., :3],
-                    surf_pts[..., 3:6],
-                    surf_pts[..., -1]]
+        "on_surf": [surf_points[..., :3],
+                    surf_points[..., 3:6],
+                    surf_points[..., -1]]
     }
 
     if n_off_surf != 0:
-        domain_pts = np.random.uniform(
+        domain_points = np.random.uniform(
             domain_bounds[0], domain_bounds[1],
             (n_off_surf, 3)
         )
 
         if no_sdf is False:
-            domain_pts = o3c.Tensor(domain_pts, dtype=o3c.Dtype.Float32)
-            domain_sdf = scene.compute_signed_distance(domain_pts)
+            domain_points = o3c.Tensor(domain_points, dtype=o3c.Dtype.Float32)
+            domain_sdf = scene.compute_signed_distance(domain_points)
             domain_sdf = torch.from_numpy(domain_sdf.numpy()).to(device)
         else:
             domain_sdf = torch.full(
@@ -225,22 +225,22 @@ def create_training_data(
                 device=device
             )
 
-        domain_pts = torch.from_numpy(domain_pts.numpy()).to(device)
-        coord_dict["off_surf"] = [domain_pts,
-                                  torch.zeros_like(domain_pts, device=device),
+        domain_points = torch.from_numpy(domain_points.numpy()).to(device)
+        coord_dict["off_surf"] = [domain_points,
+                                  torch.zeros_like(domain_points, device=device),
                                   domain_sdf]
     return coord_dict
 
 
 def read_ply(
     path: str,
-    with_curvatures: bool = False
+    with_curv: bool = False
 ):
     """Reads a PLY file with position, normal and, optionally curvature data.
 
     Note that we expect the input ply to contain x,y,z vertex data, as well
     as nx,ny,nz normal data and the curvature stored in the `quality` vertex
-    property, if `with_curvatures` is `True`, else we don't need the `quality`
+    property, if `with_curv` is `True`, else we don't need the `quality`
     attribute set.
 
     Parameters
@@ -248,7 +248,7 @@ def read_ply(
     path: str, PathLike
         Path to the ply file. We except the file to be in binary format.
 
-    with_curvatures: boolean, optional
+    with_curv: boolean, optional
         Whether the PLY file has curvatures (and we should read them) or not.
         Default value is False
 
@@ -269,7 +269,7 @@ def read_ply(
     """
     # Reading the PLY file with curvature info
     n_columns = 7  # x, y, z, nx, ny, nz, sdf
-    if with_curvatures:
+    if with_curv:
         n_columns = 8  # x, y, z, nx, ny, nz, curvature, sdf
     with open(path, "rb") as f:
         plydata = PlyData.read(f)
@@ -281,7 +281,7 @@ def read_ply(
         vertices[:, 3] = plydata["vertex"].data["nx"]
         vertices[:, 4] = plydata["vertex"].data["ny"]
         vertices[:, 5] = plydata["vertex"].data["nz"]
-        if with_curvatures:
+        if with_curv:
             vertices[:, 6] = np.abs(plydata["vertex"].data["quality"])
 
         faces = np.stack(plydata["face"].data["vertex_indices"])
@@ -291,7 +291,7 @@ def read_ply(
     mesh = o3d.t.geometry.TriangleMesh(device)
     mesh.vertex["positions"] = o3c.Tensor(vertices[:, :3], dtype=o3c.float32)
     mesh.vertex["normals"] = o3c.Tensor(vertices[:, 3:6], dtype=o3c.float32)
-    if with_curvatures:
+    if with_curv:
         mesh.vertex["curvatures"] = o3c.Tensor(vertices[:, -2],
                                                dtype=o3c.float32)
     mesh.triangle["indices"] = o3c.Tensor(faces, dtype=o3c.int32)
@@ -378,7 +378,7 @@ if __name__ == "__main__":
     samplingcfg = config.get("sampling", None)
     withcurvature = samplingcfg is not None and samplingcfg["type"] == "curvature"
 
-    mesh, vertices = read_ply(args.meshpath, with_curvatures=withcurvature)
+    mesh, vertices = read_ply(args.meshpath, with_curv=withcurvature)
     vertices = vertices.to(device)
     N = vertices.shape[0]
     nsteps = round(EPOCHS * (2 * N / BATCH))
@@ -411,21 +411,21 @@ if __name__ == "__main__":
     off_surf_samples = None
 
     # Binning the curvatures
-    curvature_fracs = []
-    curvature_threshs = []
+    curv_fracs = []
+    curv_threshs = []
     if withcurvature:
         l1, l2 = torch.quantile(
             vertices[..., -2],
-            torch.tensor(samplingcfg["curvature_percentiles"], device=device),
+            torch.tensor(samplingcfg["curv_percentiles"], device=device),
             dim=0
         )
-        curvature_threshs = [
+        curv_threshs = [
             torch.min(vertices[..., -2]),
             l1,
             l2,
             torch.max(vertices[..., -2])
         ]
-        curvature_fracs = samplingcfg["curvature_fractions"]
+        curv_fracs = samplingcfg["curv_fractions"]
 
     # Training loop
     trainingpts = torch.zeros((BATCH, 3), device=device)
@@ -449,8 +449,8 @@ if __name__ == "__main__":
                 scene=scene,
                 device=device,
                 use_curvature=withcurvature,
-                curvature_fracs=curvature_fracs,
-                curvature_threshs=curvature_threshs
+                curv_fracs=curv_fracs,
+                curv_threshs=curv_threshs
             )
             off_surf_samples = samples["off_surf"]
             off_surf_samples = [v.to(device) for v in off_surf_samples]
@@ -467,8 +467,8 @@ if __name__ == "__main__":
                 scene=scene,
                 device=device,
                 use_curvature=withcurvature,
-                curvature_fracs=curvature_fracs,
-                curvature_threshs=curvature_threshs
+                curv_fracs=curv_fracs,
+                curv_threshs=curv_threshs
             )
 
         trainingpts[:nonsurf, ...] = samples["on_surf"][0]
@@ -482,7 +482,7 @@ if __name__ == "__main__":
 
         optim.zero_grad(set_to_none=True)
         y = model(trainingpts)
-        loss = true_sdf(y, gt)
+        loss = loss_true_sdf(y, gt)
 
         running_loss = torch.zeros((1, 1), device=device)
         for k, v in loss.items():

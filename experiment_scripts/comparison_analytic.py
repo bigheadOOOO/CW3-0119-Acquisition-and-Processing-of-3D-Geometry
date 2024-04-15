@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils import parameters_to_vector
 import diff_operators
-from loss_functions import true_sdf, true_sdf_curvature, sdf_sitzmann
+from loss_functions import loss_true_sdf, loss_true_sdf_curvature, sdf_sitzmann
 from meshing import (convert_sdf_samples_to_ply, gen_mc_coordinate_grid,
                      save_ply)
 from model import SIREN
@@ -176,13 +176,13 @@ if __name__ == "__main__":
                          f" {list(model_map.keys())}")
 
     # Creating a test set for error metric evaluation.
-    test_domain_pts = torch.rand(args.test_points // 2, 3) * 2 - 1
-    test_surf_pts, _ = gen_points_on_surf(args.test_points // 2, mesh_model)
-    test_pts = torch.row_stack((test_surf_pts, test_domain_pts))
-    test_normals, test_curvatures = grad_sdf(test_surf_pts, mesh_model)
+    test_domain_points = torch.rand(args.test_points // 2, 3) * 2 - 1
+    test_surf_points, _ = gen_points_on_surf(args.test_points // 2, mesh_model)
+    test_points = torch.row_stack((test_surf_points, test_domain_points))
+    test_normals, test_curv = grad_sdf(test_surf_points, mesh_model)
     with torch.no_grad():
-        test_sdf = mesh_model(test_pts)["model_out"]
-        test_sdf[:test_domain_pts.shape[0]] = 0
+        test_sdf = mesh_model(test_points)["model_out"]
+        test_sdf[:test_domain_points.shape[0]] = 0
 
     # Marching cubes inputs
     voxel_size = 2.0 / (args.mc_resolution - 1)
@@ -202,39 +202,39 @@ if __name__ == "__main__":
         }
         i = 0
         while i < args.num_runs:
-            surf_pts, _ = gen_points_on_surf(
+            surf_points, _ = gen_points_on_surf(
                 round(args.training_points * args.fraction_on_surface),
                 mesh_model
             )
-            domain_pts = torch.rand(
+            domain_points = torch.rand(
                 round(args.training_points * (1 - args.fraction_on_surface)), 3
             ) * 2 - 1
-            training_pts = torch.row_stack((surf_pts, domain_pts)).float()
+            training_points = torch.row_stack((surf_points, domain_points)).float()
 
-            training_normals, _ = grad_sdf(training_pts, mesh_model)
+            training_normals, _ = grad_sdf(training_points, mesh_model)
             with torch.no_grad():
-                training_sdf = mesh_model(training_pts)["model_out"]
+                training_sdf = mesh_model(training_points)["model_out"]
 
             # Building the interpolant.
             start = time.time()
             interp = RBFInterpolator(
-                training_pts.detach().numpy(),
+                training_points.detach().numpy(),
                 training_sdf.detach().numpy(),
                 kernel="cubic"
             )
             tot_time = time.time() - start
 
             # Inference on the test data.
-            y_rbf = interp(test_pts.detach().numpy())
+            y_rbf = interp(test_points.detach().numpy())
             n_rbf = torch.Tensor(
-                [partial_derivative(interp, test_pts.detach().numpy()[j, :]) for j in range(args.test_points)]
+                [partial_derivative(interp, test_points.detach().numpy()[j, :]) for j in range(args.test_points)]
             )
             errs = torch.abs(test_sdf.detach() - torch.from_numpy(y_rbf))
-            errs_on_surf = errs[:test_surf_pts.shape[0]]
-            errs_off_surf = errs[test_surf_pts.shape[0]:]
+            errs_on_surf = errs[:test_surf_points.shape[0]]
+            errs_off_surf = errs[test_surf_points.shape[0]:]
             errs_normals = 1 - F.cosine_similarity(
-                test_normals[:test_surf_pts.shape[0], ...],
-                n_rbf[:test_surf_pts.shape[0], ...],
+                test_normals[:test_surf_points.shape[0], ...],
+                n_rbf[:test_surf_points.shape[0], ...],
                 dim=-1
             )
             print(f"RBF Results: MABSE {errs.mean():.3}"
@@ -284,8 +284,8 @@ if __name__ == "__main__":
             "max_abs_error_off_surface": [-1] * args.num_runs,
             "mean_normal_alignment": [-1] * args.num_runs,
             "max_normal_alignment": [-1] * args.num_runs,
-            "mean_curvature_error": [-1] * args.num_runs,
-            "max_curvature_error": [-1] * args.num_runs,
+            "mean_curv_error": [-1] * args.num_runs,
+            "max_curv_error": [-1] * args.num_runs,
             "execution_times": [-1] * args.num_runs
         }
         i = 0
@@ -301,19 +301,19 @@ if __name__ == "__main__":
             training_loss = {}
             for e in range(EPOCHS):
                 # Adding random domain samples to the points.
-                domain_pts = torch.rand(
+                domain_points = torch.rand(
                     round(args.training_points * (1 - args.fraction_on_surface)),
                     3
                 ) * 2 - 1
-                surf_pts, _ = gen_points_on_surf(
+                surf_points, _ = gen_points_on_surf(
                     round(args.training_points * args.fraction_on_surface),
                     mesh_model
                 )
-                training_pts = torch.row_stack((surf_pts, domain_pts)).float()
-                training_normals, _ = grad_sdf(training_pts, mesh_model, no_curv=True)
+                training_points = torch.row_stack((surf_points, domain_points)).float()
+                training_normals, _ = grad_sdf(training_points, mesh_model, no_curv=True)
                 training_sdf = torch.cat((
-                    torch.zeros(surf_pts.shape[0]),
-                    -1 * torch.ones(domain_pts.shape[0])
+                    torch.zeros(surf_points.shape[0]),
+                    -1 * torch.ones(domain_points.shape[0])
                 ))
 
                 gt = {
@@ -323,7 +323,7 @@ if __name__ == "__main__":
 
                 optim.zero_grad()
 
-                y = model(training_pts)
+                y = model(training_points)
                 loss = sdf_sitzmann(y, gt)
 
                 running_loss = torch.zeros((1, 1))
@@ -352,27 +352,27 @@ if __name__ == "__main__":
 
             # Testing the model
             # Inference on the test data.
-            if isinstance(test_pts, np.ndarray):
-                test_pts = torch.from_numpy(test_pts).float()
+            if isinstance(test_points, np.ndarray):
+                test_points = torch.from_numpy(test_points).float()
 
-            if isinstance(test_pts, np.ndarray):
+            if isinstance(test_points, np.ndarray):
                 test_sdf = torch.from_numpy(test_sdf).float()
 
             model.eval()
-            n_siren, curv_siren = grad_sdf(test_surf_pts, model)
+            n_siren, curv_siren = grad_sdf(test_surf_points, model)
             with torch.no_grad():
-                y_siren = model(test_pts)["model_out"].squeeze()
+                y_siren = model(test_points)["model_out"].squeeze()
                 errs = torch.abs(test_sdf - y_siren)
-                errs_on_surf = errs[:test_surf_pts.shape[0]]
-                errs_off_surf = errs[test_surf_pts.shape[0]:]
+                errs_on_surf = errs[:test_surf_points.shape[0]]
+                errs_off_surf = errs[test_surf_points.shape[0]:]
 
                 errs_normals = 1 - F.cosine_similarity(
-                    test_normals[:test_surf_pts.shape[0], ...],
+                    test_normals[:test_surf_points.shape[0], ...],
                     n_siren,
                     dim=-1
                 )
 
-                errs_curv = torch.abs(test_curvatures - curv_siren)
+                errs_curv = torch.abs(test_curv - curv_siren)
 
                 print(f"SIREN Results:"
                       f" MABSE {errs.mean():.3} -- MAXERR {errs.max().item():.3}"
@@ -393,8 +393,8 @@ if __name__ == "__main__":
                 training_stats["mean_abs_error_off_surface"][i] = errs_off_surf.mean().item()
                 training_stats["max_normal_alignment"][i] = errs_normals.max().item()
                 training_stats["mean_normal_alignment"][i] = errs_normals.mean().item()
-                training_stats["max_curvature_error"][i] = errs_curv.max().item()
-                training_stats["mean_curvature_error"][i] = errs_curv.mean().item()
+                training_stats["max_curv_error"][i] = errs_curv.max().item()
+                training_stats["mean_curv_error"][i] = errs_curv.mean().item()
                 i += 1
 
         # Marching cubes
@@ -429,8 +429,8 @@ if __name__ == "__main__":
             "max_abs_error_off_surface": [-1] * args.num_runs,
             "mean_normal_alignment": [-1] * args.num_runs,
             "max_normal_alignment": [-1] * args.num_runs,
-            "mean_curvature_error": [-1] * args.num_runs,
-            "max_curvature_error": [-1] * args.num_runs,
+            "mean_curv_error": [-1] * args.num_runs,
+            "max_curv_error": [-1] * args.num_runs,
             "execution_times": [-1] * args.num_runs
         }
         i = 0
@@ -446,18 +446,18 @@ if __name__ == "__main__":
             training_loss = {}
             for e in range(EPOCHS):
                 # Adding random domain samples to the points.
-                domain_pts = torch.rand(
+                domain_points = torch.rand(
                     round(args.training_points * (1 - args.fraction_on_surface)),
                     3
                 ) * 2 - 1
-                surf_pts, _ = gen_points_on_surf(
+                surf_points, _ = gen_points_on_surf(
                     round(args.training_points * args.fraction_on_surface),
                     mesh_model
                 )
-                training_pts = torch.row_stack((surf_pts, domain_pts)).float()
-                training_normals, _ = grad_sdf(training_pts, mesh_model, no_curv=True)
+                training_points = torch.row_stack((surf_points, domain_points)).float()
+                training_normals, _ = grad_sdf(training_points, mesh_model, no_curv=True)
                 with torch.no_grad():
-                    training_sdf = mesh_model(training_pts)["model_out"]
+                    training_sdf = mesh_model(training_points)["model_out"]
 
                 gt = {
                     "sdf": training_sdf.float().unsqueeze(1),
@@ -466,8 +466,8 @@ if __name__ == "__main__":
 
                 optim.zero_grad()
 
-                y = model(training_pts)
-                loss = true_sdf(y, gt)
+                y = model(training_points)
+                loss = loss_true_sdf(y, gt)
 
                 running_loss = torch.zeros((1, 1))
                 for k, v in loss.items():
@@ -495,27 +495,27 @@ if __name__ == "__main__":
 
             # Testing the model
             # Inference on the test data.
-            if isinstance(test_pts, np.ndarray):
-                test_pts = torch.from_numpy(test_pts).float()
+            if isinstance(test_points, np.ndarray):
+                test_points = torch.from_numpy(test_points).float()
 
-            if isinstance(test_pts, np.ndarray):
+            if isinstance(test_points, np.ndarray):
                 test_sdf = torch.from_numpy(test_sdf).float()
 
             model.eval()
-            n_i3d, curv_i3d = grad_sdf(test_surf_pts, model)
+            n_i3d, curv_i3d = grad_sdf(test_surf_points, model)
             with torch.no_grad():
-                y_i3d = model(test_pts)["model_out"].squeeze()
+                y_i3d = model(test_points)["model_out"].squeeze()
                 errs = torch.abs(test_sdf - y_i3d)
-                errs_on_surf = errs[:test_surf_pts.shape[0]]
-                errs_off_surf = errs[test_surf_pts.shape[0]:]
+                errs_on_surf = errs[:test_surf_points.shape[0]]
+                errs_off_surf = errs[test_surf_points.shape[0]:]
 
                 errs_normals = 1 - F.cosine_similarity(
-                    test_normals[:test_surf_pts.shape[0], ...],
+                    test_normals[:test_surf_points.shape[0], ...],
                     n_i3d,
                     dim=-1
                 )
 
-                errs_curv = torch.abs(test_curvatures - curv_i3d)
+                errs_curv = torch.abs(test_curv - curv_i3d)
 
                 print(f"i3d Results:"
                       f" MABSE {errs.mean():.3} -- MAXERR {errs.max().item():.3}"
@@ -536,8 +536,8 @@ if __name__ == "__main__":
                 training_stats["mean_abs_error_off_surface"][i] = errs_off_surf.mean().item()
                 training_stats["max_normal_alignment"][i] = errs_normals.max().item()
                 training_stats["mean_normal_alignment"][i] = errs_normals.mean().item()
-                training_stats["max_curvature_error"][i] = errs_curv.max().item()
-                training_stats["mean_curvature_error"][i] = errs_curv.mean().item()
+                training_stats["max_curv_error"][i] = errs_curv.max().item()
+                training_stats["mean_curv_error"][i] = errs_curv.mean().item()
                 i += 1
 
         # Marching cubes
@@ -572,8 +572,8 @@ if __name__ == "__main__":
             "max_abs_error_off_surface": [-1] * args.num_runs,
             "mean_normal_alignment": [-1] * args.num_runs,
             "max_normal_alignment": [-1] * args.num_runs,
-            "mean_curvature_error": [-1] * args.num_runs,
-            "max_curvature_error": [-1] * args.num_runs,
+            "mean_curv_error": [-1] * args.num_runs,
+            "max_curv_error": [-1] * args.num_runs,
             "execution_times": [-1] * args.num_runs
         }
         i = 0
@@ -589,29 +589,29 @@ if __name__ == "__main__":
             training_loss = {}
             for e in range(EPOCHS):
                 # Adding random domain samples to the points.
-                domain_pts = torch.rand(
+                domain_points = torch.rand(
                     round(args.training_points * (1 - args.fraction_on_surface)),
                     3
                 ) * 2 - 1
-                surf_pts, _ = gen_points_on_surf(
+                surf_points, _ = gen_points_on_surf(
                     round(args.training_points * args.fraction_on_surface),
                     mesh_model
                 )
-                training_pts = torch.row_stack((surf_pts, domain_pts)).float()
-                training_normals, tranining_curvatures = grad_sdf(training_pts, mesh_model)
+                training_points = torch.row_stack((surf_points, domain_points)).float()
+                training_normals, tranining_curv = grad_sdf(training_points, mesh_model)
                 with torch.no_grad():
-                    training_sdf = mesh_model(training_pts)["model_out"]
+                    training_sdf = mesh_model(training_points)["model_out"]
 
                 gt = {
                     "sdf": training_sdf.float().unsqueeze(1),
                     "normals": training_normals.float(),
-                    "curvature": tranining_curvatures.float(),
+                    "curvature": tranining_curv.float(),
                 }
 
                 optim.zero_grad()
 
-                y = model(training_pts)
-                loss = true_sdf_curvature(y, gt)
+                y = model(training_points)
+                loss = loss_true_sdf_curvature(y, gt)
 
                 running_loss = torch.zeros((1, 1))
                 for k, v in loss.items():
@@ -638,28 +638,28 @@ if __name__ == "__main__":
 
             # Testing the model
             # Inference on the test data.
-            if isinstance(test_pts, np.ndarray):
-                test_pts = torch.from_numpy(test_pts).float()
+            if isinstance(test_points, np.ndarray):
+                test_points = torch.from_numpy(test_points).float()
 
-            if isinstance(test_pts, np.ndarray):
+            if isinstance(test_points, np.ndarray):
                 test_sdf = torch.from_numpy(test_sdf).float()
 
             model.eval()
-            n_i3d, curv_i3d = grad_sdf(test_surf_pts, model)
+            n_i3d, curv_i3d = grad_sdf(test_surf_points, model)
             with torch.no_grad():
-                y_i3d = model(test_pts)["model_out"].squeeze()
+                y_i3d = model(test_points)["model_out"].squeeze()
                 errs = torch.abs(test_sdf - y_i3d)
-                errs_on_surf = errs[:test_surf_pts.shape[0]]
-                errs_off_surf = errs[test_surf_pts.shape[0]:]
+                errs_on_surf = errs[:test_surf_points.shape[0]]
+                errs_off_surf = errs[test_surf_points.shape[0]:]
 
-                # 1 - F.cosine_similarity(pred_vectors, gt_vectors, dim=-1)[..., None]
+                # 1 - F.cosine_similarity(pred_vectors, ground_truth_vectors, dim=-1)[..., None]
                 errs_normals = 1 - F.cosine_similarity(
-                    test_normals[:test_surf_pts.shape[0], ...],
+                    test_normals[:test_surf_points.shape[0], ...],
                     n_i3d,
                     dim=-1
                 )
 
-                errs_curv = torch.abs(test_curvatures - curv_i3d)
+                errs_curv = torch.abs(test_curv - curv_i3d)
 
                 print(f"i3dcurv Results:"
                       f" MABSE {errs.mean():.3} -- MAXERR {errs.max().item():.3}"
@@ -680,8 +680,8 @@ if __name__ == "__main__":
                 training_stats["mean_abs_error_off_surface"][i] = errs_off_surf.mean().item()
                 training_stats["max_normal_alignment"][i] = errs_normals.max().item()
                 training_stats["mean_normal_alignment"][i] = errs_normals.mean().item()
-                training_stats["max_curvature_error"][i] = errs_curv.max().item()
-                training_stats["mean_curvature_error"][i] = errs_curv.mean().item()
+                training_stats["max_curv_error"][i] = errs_curv.max().item()
+                training_stats["mean_curv_error"][i] = errs_curv.mean().item()
                 i += 1
 
         # Marching cubes

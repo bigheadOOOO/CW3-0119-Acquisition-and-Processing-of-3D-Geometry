@@ -14,7 +14,56 @@ training:
   batchsize: 20000
   resample_sdf_at: 10  # this is in epochs
 
+# NFGP #
+data:
+  type: datasets.dummy
+  num_workers: 0
+  train:
+    length: 10
+  val:
+    length: 1
+
+NFGP: 
+  save_dir: logs/smoothing_result
+
+  epochs: 5 # 10
+  seed: 100
+  wrapper_type: 'distillation'
+  beta: 0.
+  boundary_weight: 1.
+  boundary_num_points: 1000 # 10000
+  boundary_loss_points_update_step: 50
+  grad_norm_weight: 1e-2
+  grad_norm_num_points: 1000 # 10000
+  lap_loss_weight: 1e-5
+  lap_loss_threshold: 50
+  lap_loss_num_points: 1000 # 10000
+  opt:
+    type: 'adam'
+    lr: 1e-5
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.
+    
+  models:
+    decoder:
+      type: NFGP.siren_mlp
+      path: experiments/pretrained/neural_fields/armadillo/latest.pt
+      dim: 3
+      out_dim: 1
+      hidden_size: 512
+      n_blocks: 5
+      z_dim: 1
+
+  viz:
+    log_freq: 10
+    viz_freq: 10
+    save_freq: 1
+    val_freq: 1
+# NFGP END # 
+
 sampling:
   type: curvature  # curvature or uniform
-  curvature_fractions: [0.2, 0.6, 0.2]
-  curvature_percentiles: [0.6, 0.95]
+  curv_fractions: [0.2, 0.6, 0.2]
+  curv_percentiles: [0.6, 0.95]
+
